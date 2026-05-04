@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build-windows-docker:
@@ -18,10 +19,7 @@ jobs:
 
     env:
       BUILD_TYPE: Release
-      DOCKER_IMAGE: uhd-builder-vs2022-v143-x64-py312-local
       DOCKERFILE: .ci/docker/uhd-builder-vs2022-v143-x64-py312.Dockerfile
-      INSTALL_DIR_IN_CONTAINER: C:\out\uhd-install
-      BUILD_DIR_IN_CONTAINER: C:\uhd-build
 
     steps:
       - name: Checkout current repository
@@ -37,18 +35,83 @@ jobs:
           docker version
           docker info
 
-      - name: Build UHD Windows builder Docker image
+      - name: Compute builder image tag
+        id: image
         shell: pwsh
         run: |
-          if (!(Test-Path "${{ env.DOCKERFILE }}")) {
+          $repo = "${{ github.repository }}".ToLower()
+          $registry = "ghcr.io"
+          $imageName = "$registry/$repo/uhd-builder-windows"
+
+          $hashFiles = @()
+
+          if (Test-Path "${{ env.DOCKERFILE }}") {
+            $hashFiles += "${{ env.DOCKERFILE }}"
+          } else {
             throw "Dockerfile not found: ${{ env.DOCKERFILE }}"
           }
 
+          if (Test-Path ".ci/docker/vcpkg/vcpkg.json") {
+            $hashFiles += ".ci/docker/vcpkg/vcpkg.json"
+          }
+
+          if (Test-Path "host/cmake/vcpkg") {
+            $hashFiles += Get-ChildItem "host/cmake/vcpkg" -Recurse -File | ForEach-Object { $_.FullName }
+          }
+
+          $sha256 = [System.Security.Cryptography.SHA256]::Create()
+          $builder = New-Object System.Text.StringBuilder
+
+          foreach ($file in $hashFiles | Sort-Object) {
+            $bytes = [System.IO.File]::ReadAllBytes($file)
+            $hash = $sha256.ComputeHash($bytes)
+            $hex = -join ($hash | ForEach-Object { $_.ToString("x2") })
+            [void]$builder.Append($hex)
+          }
+
+          $finalBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+          $finalHash = $sha256.ComputeHash($finalBytes)
+          $tagHash = (-join ($finalHash | ForEach-Object { $_.ToString("x2") })).Substring(0, 16)
+
+          $image = "${imageName}:${tagHash}"
+
+          "BUILDER_IMAGE=$image" >> $env:GITHUB_ENV
+          "BUILDER_IMAGE_LATEST=${imageName}:latest" >> $env:GITHUB_ENV
+
+          Write-Host "BUILDER_IMAGE=$image"
+          Write-Host "BUILDER_IMAGE_LATEST=${imageName}:latest"
+
+      - name: Login to GHCR
+        shell: pwsh
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull cached builder image
+        id: pull_builder
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          docker pull "${{ env.BUILDER_IMAGE }}"
+
+      - name: Build and push builder image if missing
+        if: steps.pull_builder.outcome != 'success'
+        shell: pwsh
+        run: |
           docker build `
             --isolation=process `
-            -t ${{ env.DOCKER_IMAGE }} `
-            -f ${{ env.DOCKERFILE }} `
+            -t "${{ env.BUILDER_IMAGE }}" `
+            -t "${{ env.BUILDER_IMAGE_LATEST }}" `
+            -f "${{ env.DOCKERFILE }}" `
             .
+
+          docker push "${{ env.BUILDER_IMAGE }}"
+          docker push "${{ env.BUILDER_IMAGE_LATEST }}"
+
+      - name: Show builder image
+        shell: pwsh
+        run: |
+          docker images
+          docker inspect "${{ env.BUILDER_IMAGE }}" --format='{{.Id}} {{.Created}}'
 
       - name: Build UHD inside Docker container
         shell: pwsh
@@ -91,7 +154,7 @@ jobs:
             --memory 12G `
             -v "${workspace}:C:\src" `
             -v "${dist}:C:\out" `
-            ${{ env.DOCKER_IMAGE }} `
+            "${{ env.BUILDER_IMAGE }}" `
             cmd /S /C $buildCmd
 
       - name: Verify install output
