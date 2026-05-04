@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build-windows:
@@ -19,6 +20,8 @@ jobs:
       BUILD_TYPE: Release
       INSTALL_DIR: ${{ github.workspace }}\uhd-install
       VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
 
     steps:
       - name: Checkout current repository
@@ -39,30 +42,38 @@ jobs:
         run: |
           python --version
           python -m pip install --upgrade pip
-          python -m pip install mako requests numpy ruamel.yaml
-          python -c "import mako, requests, numpy, ruamel.yaml; print('Python modules OK')"
+          python -m pip install mako requests numpy ruamel.yaml jsonschema
+          python -c "import mako, requests, numpy, ruamel.yaml, jsonschema; print('Python modules OK')"
 
       - name: Setup MSVC developer shell
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Setup vcpkg cache
+      - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: |
-            C:\vcpkg\installed
-            C:\vcpkg\buildtrees
-            C:\vcpkg\packages
-            C:\vcpkg\downloads
-          key: vcpkg-uhd-windows-${{ runner.os }}-${{ hashFiles('.github/workflows/build-uhd-windows.yml') }}
+            ${{ env.VCPKG_BINARY_CACHE }}
+          key: vcpkg-binary-cache-windows-x64-${{ hashFiles('.github/workflows/build-uhd-windows.yml') }}
           restore-keys: |
-            vcpkg-uhd-windows-${{ runner.os }}-
+            vcpkg-binary-cache-windows-x64-
+
+      - name: Prepare vcpkg binary cache directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_BINARY_CACHE }}" | Out-Null
+          echo "VCPKG_BINARY_CACHE=${{ env.VCPKG_BINARY_CACHE }}"
+          echo "VCPKG_BINARY_SOURCES=${{ env.VCPKG_BINARY_SOURCES }}"
 
       - name: Install UHD dependencies with vcpkg
         shell: pwsh
         run: |
+          vcpkg version
+
           vcpkg install `
+            boost-asio:x64-windows `
+            boost-format:x64-windows `
             boost-filesystem:x64-windows `
             boost-program-options:x64-windows `
             boost-system:x64-windows `
@@ -76,6 +87,19 @@ jobs:
             spdlog:x64-windows `
             fmt:x64-windows
 
+      - name: Check Boost headers
+        shell: pwsh
+        run: |
+          if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\boost\asio.hpp")) {
+            throw "boost/asio.hpp not found"
+          }
+
+          if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\boost\format.hpp")) {
+            throw "boost/format.hpp not found"
+          }
+
+          Write-Host "Boost headers OK"
+
       - name: Configure UHD
         shell: pwsh
         run: |
@@ -84,6 +108,7 @@ jobs:
             -A x64 `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
             -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" `
             -DPYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
             -DRUNTIME_PYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
