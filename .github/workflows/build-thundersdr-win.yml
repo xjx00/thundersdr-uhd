@@ -1,4 +1,4 @@
-name: Build Minimal UHD X300 Windows
+name: Build Minimal UHD Windows
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ permissions:
   contents: write
 
 jobs:
-  build-windows-x300-minimal:
-    name: Build minimal UHD X300 for Windows
+  build-windows-minimal:
+    name: Build minimal UHD for Windows
     runs-on: windows-2022
     timeout-minutes: 360
 
@@ -159,7 +159,7 @@ jobs:
             Write-Host "Found: $path"
           }
 
-      - name: Configure minimal UHD X300
+      - name: Configure minimal UHD
         shell: pwsh
         run: |
           if (Test-Path "${{ env.BUILD_DIR }}") {
@@ -206,6 +206,9 @@ jobs:
             -DENABLE_E320=OFF `
             -DENABLE_X400=OFF `
             -DENABLE_OCTOCLOCK=OFF `
+            -DUHD_LOG_MIN_LEVEL=debug `
+            -DUHD_LOG_CONSOLE_LEVEL=debug `
+            -DUHD_LOG_FILE_LEVEL=debug `
             -DENABLE_DPDK=OFF
 
       - name: Print UHD component summary
@@ -265,7 +268,7 @@ jobs:
           }
 
           $safeName = $name -replace '[^a-zA-Z0-9._-]', '-'
-          $zipName = "uhd-windows-x64-x300-minimal-$safeName.zip"
+          $zipName = "uhd-windows-x64-minimal-$safeName.zip"
 
           Compress-Archive `
             -Path "${{ env.INSTALL_DIR }}\*" `
@@ -279,10 +282,3 @@ jobs:
         with:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}
-
-      - name: Upload zip to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.ZIP_NAME }}
-          generate_release_notes: true
