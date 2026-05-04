@@ -19,6 +19,7 @@ jobs:
     env:
       BUILD_TYPE: Release
       INSTALL_DIR: ${{ github.workspace }}\uhd-install
+      VCPKG_ROOT: C:\vcpkg
       VCPKG_DEFAULT_TRIPLET: x64-windows
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
@@ -42,8 +43,8 @@ jobs:
         run: |
           python --version
           python -m pip install --upgrade pip
-          python -m pip install mako requests numpy ruamel.yaml jsonschema
-          python -c "import mako, requests, numpy, ruamel.yaml, jsonschema; print('Python modules OK')"
+          python -m pip install mako requests numpy ruamel.yaml setuptools poetry jsonschema
+          python -c "import mako, requests, numpy, ruamel.yaml, setuptools, jsonschema; print('Python modules OK')"
 
       - name: Setup MSVC developer shell
         uses: ilammy/msvc-dev-cmd@v1
@@ -55,16 +56,16 @@ jobs:
         with:
           path: |
             ${{ env.VCPKG_BINARY_CACHE }}
-          key: vcpkg-binary-cache-windows-x64-${{ hashFiles('.github/workflows/build-uhd-windows.yml') }}
+          key: vcpkg-binary-cache-windows-x64-uhd-${{ hashFiles('.github/workflows/build-uhd-windows.yml') }}
           restore-keys: |
-            vcpkg-binary-cache-windows-x64-
+            vcpkg-binary-cache-windows-x64-uhd-
 
-      - name: Prepare vcpkg binary cache directory
+      - name: Prepare vcpkg binary cache
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_BINARY_CACHE }}" | Out-Null
-          echo "VCPKG_BINARY_CACHE=${{ env.VCPKG_BINARY_CACHE }}"
-          echo "VCPKG_BINARY_SOURCES=${{ env.VCPKG_BINARY_SOURCES }}"
+          Write-Host "VCPKG_BINARY_CACHE=${{ env.VCPKG_BINARY_CACHE }}"
+          Write-Host "VCPKG_BINARY_SOURCES=${{ env.VCPKG_BINARY_SOURCES }}"
 
       - name: Install UHD dependencies with vcpkg
         shell: pwsh
@@ -74,6 +75,8 @@ jobs:
           vcpkg install `
             boost-asio:x64-windows `
             boost-format:x64-windows `
+            boost-math:x64-windows `
+            boost-graph:x64-windows `
             boost-filesystem:x64-windows `
             boost-program-options:x64-windows `
             boost-system:x64-windows `
@@ -84,21 +87,59 @@ jobs:
             boost-chrono:x64-windows `
             libusb:x64-windows `
             libusb-win32:x64-windows `
-            spdlog:x64-windows `
-            fmt:x64-windows
+            fmt:x64-windows `
+            spdlog:x64-windows
 
-      - name: Check Boost headers
+      - name: Locate dependency paths
+        id: deps
         shell: pwsh
         run: |
-          if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\boost\asio.hpp")) {
-            throw "boost/asio.hpp not found"
+          $vcpkgInstalled = "C:\vcpkg\installed\x64-windows"
+
+          $boostInclude = Join-Path $vcpkgInstalled "include"
+          $boostLib = Join-Path $vcpkgInstalled "lib"
+          $boostShare = Join-Path $vcpkgInstalled "share\boost"
+
+          $libusbInclude = Join-Path $vcpkgInstalled "include\libusb-1.0"
+          $libusbLib = Join-Path $vcpkgInstalled "lib\libusb-1.0.lib"
+
+          $requiredBoostHeaders = @(
+            "boost\asio.hpp",
+            "boost\format.hpp",
+            "boost\math\special_functions\round.hpp",
+            "boost\graph\adjacency_list.hpp"
+          )
+
+          foreach ($header in $requiredBoostHeaders) {
+            $path = Join-Path $boostInclude $header
+            if (!(Test-Path $path)) {
+              throw "Missing Boost header: $path"
+            }
           }
 
-          if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\boost\format.hpp")) {
-            throw "boost/format.hpp not found"
+          if (!(Test-Path $boostShare)) {
+            throw "Boost_DIR not found: $boostShare"
           }
 
-          Write-Host "Boost headers OK"
+          if (!(Test-Path (Join-Path $libusbInclude "libusb.h"))) {
+            throw "libusb.h not found"
+          }
+
+          if (!(Test-Path $libusbLib)) {
+            throw "libusb-1.0.lib not found"
+          }
+
+          "BOOST_DIR=$boostShare" >> $env:GITHUB_ENV
+          "BOOST_INCLUDE_DIR=$boostInclude" >> $env:GITHUB_ENV
+          "BOOST_LIBRARY_DIR=$boostLib" >> $env:GITHUB_ENV
+          "LIBUSB_INCLUDE_DIRS=$libusbInclude" >> $env:GITHUB_ENV
+          "LIBUSB_LIBRARIES=$libusbLib" >> $env:GITHUB_ENV
+
+          Write-Host "BOOST_DIR=$boostShare"
+          Write-Host "BOOST_INCLUDE_DIR=$boostInclude"
+          Write-Host "BOOST_LIBRARY_DIR=$boostLib"
+          Write-Host "LIBUSB_INCLUDE_DIRS=$libusbInclude"
+          Write-Host "LIBUSB_LIBRARIES=$libusbLib"
 
       - name: Configure UHD
         shell: pwsh
@@ -107,9 +148,19 @@ jobs:
             -G "Visual Studio 17 2022" `
             -A x64 `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -DCMAKE_C_FLAGS="/MP" `
+            -DCMAKE_CXX_FLAGS="/MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" `
+            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" `
             -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" `
+            -DCMAKE_PREFIX_PATH="C:\vcpkg\installed\x64-windows" `
+            -DBoost_DIR="${{ env.BOOST_DIR }}" `
+            -DBoost_INCLUDE_DIR="${{ env.BOOST_INCLUDE_DIR }}" `
+            -DBOOST_INCLUDEDIR="${{ env.BOOST_INCLUDE_DIR }}" `
+            -DBOOST_LIBRARYDIR="${{ env.BOOST_LIBRARY_DIR }}" `
+            -DBoost_NO_SYSTEM_PATHS=ON `
+            -DLIBUSB_INCLUDE_DIRS="${{ env.LIBUSB_INCLUDE_DIRS }}" `
+            -DLIBUSB_LIBRARIES="${{ env.LIBUSB_LIBRARIES }}" `
             -DPYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
             -DRUNTIME_PYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
             -DENABLE_TESTS=OFF `
@@ -122,7 +173,14 @@ jobs:
       - name: Build UHD
         shell: pwsh
         run: |
-          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+          $cpu = [Environment]::ProcessorCount
+          Write-Host "CPU count: $cpu"
+
+          cmake --build build `
+            --config ${{ env.BUILD_TYPE }} `
+            --parallel $cpu `
+            -- `
+            /m:$cpu
 
       - name: Install UHD
         shell: pwsh
