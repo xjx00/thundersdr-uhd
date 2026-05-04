@@ -1,4 +1,4 @@
-name: Build UHD Windows
+name: Build Minimal UHD X300 Windows
 
 on:
   workflow_dispatch:
@@ -11,21 +11,23 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: Build UHD for Windows
+  build-windows-x300-minimal:
+    name: Build minimal UHD X300 for Windows
     runs-on: windows-2022
     timeout-minutes: 360
 
     env:
       BUILD_TYPE: Release
+
       VCPKG_ROOT: C:\vcpkg
       VCPKG_TRIPLET: uhd-x64-windows-static-md
       VCPKG_MANIFEST_DIR: ${{ github.workspace }}\uhd-vcpkg
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
-      INSTALL_DIR: ${{ github.workspace }}\uhd-install
+
       BUILD_DIR: ${{ github.workspace }}\build
+      INSTALL_DIR: ${{ github.workspace }}\uhd-install
 
     steps:
       - name: Checkout current repository
@@ -65,17 +67,40 @@ jobs:
             throw "UHD custom vcpkg triplet directory not found: host\cmake\vcpkg"
           }
 
-          if (!(Test-Path ".ci\docker\vcpkg\vcpkg.json")) {
-            throw "UHD vcpkg manifest not found: .ci\docker\vcpkg\vcpkg.json"
-          }
-
           Copy-Item "host\cmake\vcpkg\*" "${{ env.VCPKG_ROOT }}\triplets\" -Force
 
           New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_MANIFEST_DIR }}" | Out-Null
-          Copy-Item ".ci\docker\vcpkg\vcpkg.json" "${{ env.VCPKG_MANIFEST_DIR }}\vcpkg.json" -Force
-
           New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_INSTALLED_DIR }}" | Out-Null
           New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_BINARY_CACHE }}" | Out-Null
+
+          @'
+          {
+            "dependencies": [
+              "boost-asio",
+              "boost-assign",
+              "boost-atomic",
+              "boost-circular-buffer",
+              "boost-date-time",
+              "boost-dll",
+              "boost-exception",
+              "boost-filesystem",
+              "boost-format",
+              "boost-graph",
+              "boost-lockfree",
+              "boost-math",
+              "boost-program-options",
+              "boost-regex",
+              "boost-serialization",
+              "boost-stacktrace",
+              "boost-system",
+              "boost-thread",
+              "boost-timer",
+              "boost-units",
+              "pkgconf"
+            ],
+            "builtin-baseline": "f176b58f35a75f9f8f54099cd9df97d2e2793a2e"
+          }
+          '@ | Set-Content -Encoding UTF8 "${{ env.VCPKG_MANIFEST_DIR }}\vcpkg.json"
 
           Write-Host "VCPKG_ROOT=${{ env.VCPKG_ROOT }}"
           Write-Host "VCPKG_TRIPLET=${{ env.VCPKG_TRIPLET }}"
@@ -88,7 +113,7 @@ jobs:
         with:
           path: |
             ${{ env.VCPKG_INSTALLED_DIR }}
-          key: vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.ci/docker/vcpkg/vcpkg.json', 'host/cmake/vcpkg/**') }}
+          key: vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('host/cmake/vcpkg/**') }}-minimal-x300-v2
           restore-keys: |
             vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-
 
@@ -97,7 +122,7 @@ jobs:
         with:
           path: |
             ${{ env.VCPKG_BINARY_CACHE }}
-          key: vcpkg-binary-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.ci/docker/vcpkg/vcpkg.json', 'host/cmake/vcpkg/**') }}
+          key: vcpkg-binary-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('host/cmake/vcpkg/**') }}-minimal-x300-v2
           restore-keys: |
             vcpkg-binary-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-
 
@@ -122,7 +147,8 @@ jobs:
             "boost\format.hpp",
             "boost\math\special_functions\round.hpp",
             "boost\graph\adjacency_list.hpp",
-            "libusb-1.0\libusb.h"
+            "boost\program_options.hpp",
+            "boost\filesystem.hpp"
           )
 
           foreach ($header in $headers) {
@@ -133,7 +159,7 @@ jobs:
             Write-Host "Found: $path"
           }
 
-      - name: Configure UHD
+      - name: Configure minimal UHD X300
         shell: pwsh
         run: |
           if (Test-Path "${{ env.BUILD_DIR }}") {
@@ -157,13 +183,43 @@ jobs:
             -DPYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
             -DRUNTIME_PYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
             -DCMAKE_C_FLAGS="/MP" `
-            -DCMAKE_CXX_FLAGS="/MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" `
+            -DCMAKE_CXX_FLAGS="/EHsc /MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" `
             -DENABLE_TESTS=OFF `
             -DENABLE_EXAMPLES=OFF `
             -DENABLE_UTILS=ON `
-            -DENABLE_USB=ON `
             -DENABLE_PYTHON_API=OFF `
-            -DENABLE_C_API=ON
+            -DENABLE_C_API=ON `
+            -DENABLE_STATIC_LIBS=OFF `
+            -DENABLE_USB=OFF `
+            -DENABLE_NIRIO=OFF `
+            -DENABLE_NIUSRP=OFF `
+            -DENABLE_B100=OFF `
+            -DENABLE_B200=OFF `
+            -DENABLE_USRP1=OFF `
+            -DENABLE_USRP2=OFF `
+            -DENABLE_X300=ON `
+            -DENABLE_MPMD=OFF `
+            -DENABLE_SIM=OFF `
+            -DENABLE_N300=OFF `
+            -DENABLE_N320=OFF `
+            -DENABLE_E300=OFF `
+            -DENABLE_E320=OFF `
+            -DENABLE_X400=OFF `
+            -DENABLE_OCTOCLOCK=OFF `
+            -DENABLE_DPDK=OFF
+
+      - name: Print UHD component summary
+        shell: pwsh
+        run: |
+          $cache = "${{ env.BUILD_DIR }}\CMakeCache.txt"
+
+          if (!(Test-Path $cache)) {
+            throw "CMakeCache.txt not found"
+          }
+
+          Select-String -Path $cache -Pattern "ENABLE_" | ForEach-Object {
+            Write-Host $_.Line
+          }
 
       - name: Build UHD with MSBuild parallelism
         shell: pwsh
@@ -175,23 +231,13 @@ jobs:
             --config ${{ env.BUILD_TYPE }} `
             --parallel $cpu `
             -- `
-            /m:$cpu
+            /m:$cpu `
+            /p:CL_MPCount=$cpu
 
       - name: Install UHD
         shell: pwsh
         run: |
           cmake --install "${{ env.BUILD_DIR }}" --config ${{ env.BUILD_TYPE }}
-
-      - name: Copy vcpkg runtime DLLs
-        shell: pwsh
-        run: |
-          $bin = "${{ env.INSTALL_DIR }}\bin"
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-
-          $vcpkgBin = "${{ env.VCPKG_INSTALLED_DIR }}\${{ env.VCPKG_TRIPLET }}\bin"
-          if (Test-Path $vcpkgBin) {
-            Copy-Item "$vcpkgBin\*.dll" $bin -Force -ErrorAction SilentlyContinue
-          }
 
       - name: Verify install output
         shell: pwsh
@@ -219,7 +265,7 @@ jobs:
           }
 
           $safeName = $name -replace '[^a-zA-Z0-9._-]', '-'
-          $zipName = "uhd-windows-x64-$safeName.zip"
+          $zipName = "uhd-windows-x64-x300-minimal-$safeName.zip"
 
           Compress-Archive `
             -Path "${{ env.INSTALL_DIR }}\*" `
