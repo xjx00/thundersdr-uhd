@@ -1,4 +1,4 @@
-name: Build UHD Windows Docker
+name: Build UHD Windows
 
 on:
   workflow_dispatch:
@@ -9,17 +9,23 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
-  build-windows-docker:
-    name: Build UHD Windows in Docker
-    runs-on: windows-2025
+  build-windows:
+    name: Build UHD for Windows
+    runs-on: windows-2022
     timeout-minutes: 360
 
     env:
       BUILD_TYPE: Release
-      DOCKERFILE: .ci/docker/uhd-builder-vs2022-v143-x64-py312.Dockerfile
+      VCPKG_ROOT: C:\vcpkg
+      VCPKG_TRIPLET: uhd-x64-windows-static-md
+      VCPKG_MANIFEST_DIR: ${{ github.workspace }}\uhd-vcpkg
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
+      VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
+      INSTALL_DIR: ${{ github.workspace }}\uhd-install
+      BUILD_DIR: ${{ github.workspace }}\build
 
     steps:
       - name: Checkout current repository
@@ -29,146 +35,174 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Check Docker
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        id: setup-python
+        with:
+          python-version: "3.12"
+
+      - name: Install Python build modules
         shell: pwsh
         run: |
-          docker version
-          docker info
+          python --version
+          python -m pip install --upgrade pip
+          python -m pip install mako requests numpy ruamel.yaml setuptools jsonschema
+          python -c "import mako, requests, numpy, ruamel.yaml, setuptools, jsonschema; print('Python modules OK')"
 
-      - name: Compute builder image tag
-        id: image
+      - name: Setup MSVC developer shell
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Prepare vcpkg manifest and UHD triplet
         shell: pwsh
         run: |
-          $repo = "${{ github.repository }}".ToLower()
-          $registry = "ghcr.io"
-          $imageName = "$registry/$repo/uhd-builder-windows"
-
-          $hashFiles = @()
-
-          if (Test-Path "${{ env.DOCKERFILE }}") {
-            $hashFiles += "${{ env.DOCKERFILE }}"
-          } else {
-            throw "Dockerfile not found: ${{ env.DOCKERFILE }}"
+          if (!(Test-Path "${{ env.VCPKG_ROOT }}\vcpkg.exe")) {
+            throw "vcpkg.exe not found at ${{ env.VCPKG_ROOT }}\vcpkg.exe"
           }
 
-          if (Test-Path ".ci/docker/vcpkg/vcpkg.json") {
-            $hashFiles += ".ci/docker/vcpkg/vcpkg.json"
+          if (!(Test-Path "host\cmake\vcpkg")) {
+            throw "UHD custom vcpkg triplet directory not found: host\cmake\vcpkg"
           }
 
-          if (Test-Path "host/cmake/vcpkg") {
-            $hashFiles += Get-ChildItem "host/cmake/vcpkg" -Recurse -File | ForEach-Object { $_.FullName }
+          if (!(Test-Path ".ci\docker\vcpkg\vcpkg.json")) {
+            throw "UHD vcpkg manifest not found: .ci\docker\vcpkg\vcpkg.json"
           }
 
-          $sha256 = [System.Security.Cryptography.SHA256]::Create()
-          $builder = New-Object System.Text.StringBuilder
+          Copy-Item "host\cmake\vcpkg\*" "${{ env.VCPKG_ROOT }}\triplets\" -Force
 
-          foreach ($file in $hashFiles | Sort-Object) {
-            $bytes = [System.IO.File]::ReadAllBytes($file)
-            $hash = $sha256.ComputeHash($bytes)
-            $hex = -join ($hash | ForEach-Object { $_.ToString("x2") })
-            [void]$builder.Append($hex)
+          New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_MANIFEST_DIR }}" | Out-Null
+          Copy-Item ".ci\docker\vcpkg\vcpkg.json" "${{ env.VCPKG_MANIFEST_DIR }}\vcpkg.json" -Force
+
+          New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_INSTALLED_DIR }}" | Out-Null
+          New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_BINARY_CACHE }}" | Out-Null
+
+          Write-Host "VCPKG_ROOT=${{ env.VCPKG_ROOT }}"
+          Write-Host "VCPKG_TRIPLET=${{ env.VCPKG_TRIPLET }}"
+          Write-Host "VCPKG_MANIFEST_DIR=${{ env.VCPKG_MANIFEST_DIR }}"
+          Write-Host "VCPKG_INSTALLED_DIR=${{ env.VCPKG_INSTALLED_DIR }}"
+          Write-Host "VCPKG_BINARY_CACHE=${{ env.VCPKG_BINARY_CACHE }}"
+
+      - name: Restore vcpkg installed tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_INSTALLED_DIR }}
+          key: vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.ci/docker/vcpkg/vcpkg.json', 'host/cmake/vcpkg/**') }}
+          restore-keys: |
+            vcpkg-installed-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_BINARY_CACHE }}
+          key: vcpkg-binary-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.ci/docker/vcpkg/vcpkg.json', 'host/cmake/vcpkg/**') }}
+          restore-keys: |
+            vcpkg-binary-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-
+
+      - name: Install UHD dependencies with vcpkg manifest
+        shell: pwsh
+        run: |
+          & "${{ env.VCPKG_ROOT }}\vcpkg.exe" version
+
+          & "${{ env.VCPKG_ROOT }}\vcpkg.exe" install `
+            --triplet "${{ env.VCPKG_TRIPLET }}" `
+            --x-manifest-root="${{ env.VCPKG_MANIFEST_DIR }}" `
+            --x-install-root="${{ env.VCPKG_INSTALLED_DIR }}" `
+            --clean-after-build
+
+      - name: Check required dependency headers
+        shell: pwsh
+        run: |
+          $include = "${{ env.VCPKG_INSTALLED_DIR }}\${{ env.VCPKG_TRIPLET }}\include"
+
+          $headers = @(
+            "boost\asio.hpp",
+            "boost\format.hpp",
+            "boost\math\special_functions\round.hpp",
+            "boost\graph\adjacency_list.hpp",
+            "libusb-1.0\libusb.h"
+          )
+
+          foreach ($header in $headers) {
+            $path = Join-Path $include $header
+            if (!(Test-Path $path)) {
+              throw "Missing dependency header: $path"
+            }
+            Write-Host "Found: $path"
           }
 
-          $finalBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-          $finalHash = $sha256.ComputeHash($finalBytes)
-          $tagHash = (-join ($finalHash | ForEach-Object { $_.ToString("x2") })).Substring(0, 16)
-
-          $image = "${imageName}:${tagHash}"
-
-          "BUILDER_IMAGE=$image" >> $env:GITHUB_ENV
-          "BUILDER_IMAGE_LATEST=${imageName}:latest" >> $env:GITHUB_ENV
-
-          Write-Host "BUILDER_IMAGE=$image"
-          Write-Host "BUILDER_IMAGE_LATEST=${imageName}:latest"
-
-      - name: Login to GHCR
+      - name: Configure UHD
         shell: pwsh
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if (Test-Path "${{ env.BUILD_DIR }}") {
+            Remove-Item "${{ env.BUILD_DIR }}" -Recurse -Force
+          }
 
-      - name: Pull cached builder image
-        id: pull_builder
+          if (Test-Path "${{ env.INSTALL_DIR }}") {
+            Remove-Item "${{ env.INSTALL_DIR }}" -Recurse -Force
+          }
+
+          cmake -S host -B "${{ env.BUILD_DIR }}" `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" `
+            -DCMAKE_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="${{ env.VCPKG_TRIPLET }}" `
+            -DVCPKG_INSTALLED_DIR="${{ env.VCPKG_INSTALLED_DIR }}" `
+            -DVCPKG_MANIFEST_DIR="${{ env.VCPKG_MANIFEST_DIR }}" `
+            -DCMAKE_PREFIX_PATH="${{ env.VCPKG_INSTALLED_DIR }}\${{ env.VCPKG_TRIPLET }}" `
+            -DPYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
+            -DRUNTIME_PYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
+            -DCMAKE_C_FLAGS="/MP" `
+            -DCMAKE_CXX_FLAGS="/MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" `
+            -DENABLE_TESTS=OFF `
+            -DENABLE_EXAMPLES=OFF `
+            -DENABLE_UTILS=ON `
+            -DENABLE_USB=ON `
+            -DENABLE_PYTHON_API=OFF `
+            -DENABLE_C_API=ON
+
+      - name: Build UHD with MSBuild parallelism
         shell: pwsh
-        continue-on-error: true
         run: |
-          docker pull "${{ env.BUILDER_IMAGE }}"
+          $cpu = [Environment]::ProcessorCount
+          Write-Host "CPU count: $cpu"
 
-      - name: Build and push builder image if missing
-        if: steps.pull_builder.outcome != 'success'
+          cmake --build "${{ env.BUILD_DIR }}" `
+            --config ${{ env.BUILD_TYPE }} `
+            --parallel $cpu `
+            -- `
+            /m:$cpu
+
+      - name: Install UHD
         shell: pwsh
         run: |
-          docker build `
-            --isolation=process `
-            -t "${{ env.BUILDER_IMAGE }}" `
-            -t "${{ env.BUILDER_IMAGE_LATEST }}" `
-            -f "${{ env.DOCKERFILE }}" `
-            .
+          cmake --install "${{ env.BUILD_DIR }}" --config ${{ env.BUILD_TYPE }}
 
-          docker push "${{ env.BUILDER_IMAGE }}"
-          docker push "${{ env.BUILDER_IMAGE_LATEST }}"
-
-      - name: Show builder image
+      - name: Copy vcpkg runtime DLLs
         shell: pwsh
         run: |
-          docker images
-          docker inspect "${{ env.BUILDER_IMAGE }}" --format='{{.Id}} {{.Created}}'
+          $bin = "${{ env.INSTALL_DIR }}\bin"
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
-      - name: Build UHD inside Docker container
-        shell: pwsh
-        run: |
-          $workspace = "${{ github.workspace }}"
-          $dist = Join-Path $workspace "dist"
-          New-Item -ItemType Directory -Force -Path $dist | Out-Null
-
-          $buildCmd = @'
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 && ^
-          git config --global --add safe.directory C:/src && ^
-          if exist C:\uhd-build rmdir /S /Q C:\uhd-build && ^
-          if exist C:\out\uhd-install rmdir /S /Q C:\out\uhd-install && ^
-          mkdir C:\uhd-build && ^
-          cmake -S C:\src\host -B C:\uhd-build ^
-            -G "Visual Studio 17 2022" ^
-            -A x64 ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DCMAKE_INSTALL_PREFIX=C:\out\uhd-install ^
-            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-            -DVCPKG_TARGET_TRIPLET=uhd-x64-windows-static-md ^
-            -DVCPKG_INSTALLED_DIR=C:\uhd-vcpkg\vcpkg_installed ^
-            -DVCPKG_MANIFEST_DIR=C:\uhd-vcpkg ^
-            -DENABLE_TESTS=OFF ^
-            -DENABLE_EXAMPLES=OFF ^
-            -DENABLE_UTILS=ON ^
-            -DENABLE_USB=ON ^
-            -DENABLE_PYTHON_API=OFF ^
-            -DENABLE_C_API=ON ^
-            -DCMAKE_C_FLAGS="/MP" ^
-            -DCMAKE_CXX_FLAGS="/MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" && ^
-          cmake --build C:\uhd-build --config Release --parallel %NUMBER_OF_PROCESSORS% -- /m:%NUMBER_OF_PROCESSORS% && ^
-          cmake --install C:\uhd-build --config Release
-          '@
-
-          docker run `
-            --rm `
-            --isolation=process `
-            --cpu-count 6 `
-            --memory 12G `
-            -v "${workspace}:C:\src" `
-            -v "${dist}:C:\out" `
-            "${{ env.BUILDER_IMAGE }}" `
-            cmd /S /C $buildCmd
+          $vcpkgBin = "${{ env.VCPKG_INSTALLED_DIR }}\${{ env.VCPKG_TRIPLET }}\bin"
+          if (Test-Path $vcpkgBin) {
+            Copy-Item "$vcpkgBin\*.dll" $bin -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Verify install output
         shell: pwsh
         run: |
-          $install = "${{ github.workspace }}\dist\uhd-install"
-
-          if (!(Test-Path $install)) {
-            throw "Install directory not found: $install"
+          if (!(Test-Path "${{ env.INSTALL_DIR }}")) {
+            throw "Install directory not found: ${{ env.INSTALL_DIR }}"
           }
 
-          Get-ChildItem -Recurse $install | Select-Object FullName
+          Get-ChildItem -Recurse "${{ env.INSTALL_DIR }}" | Select-Object FullName
 
-          if (!(Test-Path "$install\bin")) {
+          if (!(Test-Path "${{ env.INSTALL_DIR }}\bin")) {
             throw "UHD install bin directory not found"
           }
 
@@ -185,10 +219,10 @@ jobs:
           }
 
           $safeName = $name -replace '[^a-zA-Z0-9._-]', '-'
-          $zipName = "uhd-windows-x64-docker-$safeName.zip"
+          $zipName = "uhd-windows-x64-$safeName.zip"
 
           Compress-Archive `
-            -Path "${{ github.workspace }}\dist\uhd-install\*" `
+            -Path "${{ env.INSTALL_DIR }}\*" `
             -DestinationPath "${{ github.workspace }}\$zipName" `
             -Force
 
