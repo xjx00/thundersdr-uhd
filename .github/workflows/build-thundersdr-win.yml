@@ -1,4 +1,4 @@
-name: Build UHD Windows
+name: Build UHD Windows Docker
 
 on:
   workflow_dispatch:
@@ -9,20 +9,19 @@ on:
 
 permissions:
   contents: write
-  actions: read
 
 jobs:
-  build-windows:
-    name: Build UHD for Windows
-    runs-on: windows-2022
+  build-windows-docker:
+    name: Build UHD Windows in Docker
+    runs-on: windows-2025
+    timeout-minutes: 360
 
     env:
       BUILD_TYPE: Release
-      INSTALL_DIR: ${{ github.workspace }}\uhd-install
-      VCPKG_ROOT: C:\vcpkg
-      VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
-      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
+      DOCKER_IMAGE: uhd-builder-vs2022-v143-x64-py312-local
+      DOCKERFILE: .ci/docker/uhd-builder-vs2022-v143-x64-py312.Dockerfile
+      INSTALL_DIR_IN_CONTAINER: C:\out\uhd-install
+      BUILD_DIR_IN_CONTAINER: C:\uhd-build
 
     steps:
       - name: Checkout current repository
@@ -32,170 +31,82 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        id: setup-python
-        with:
-          python-version: "3.11"
-
-      - name: Install Python build modules
+      - name: Check Docker
         shell: pwsh
         run: |
-          python --version
-          python -m pip install --upgrade pip
-          python -m pip install mako requests numpy ruamel.yaml setuptools poetry jsonschema
-          python -c "import mako, requests, numpy, ruamel.yaml, setuptools, jsonschema; print('Python modules OK')"
+          docker version
+          docker info
 
-      - name: Setup MSVC developer shell
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.VCPKG_BINARY_CACHE }}
-          key: vcpkg-binary-cache-windows-x64-uhd-${{ hashFiles('.github/workflows/build-uhd-windows.yml') }}
-          restore-keys: |
-            vcpkg-binary-cache-windows-x64-uhd-
-
-      - name: Prepare vcpkg binary cache
+      - name: Build UHD Windows builder Docker image
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_BINARY_CACHE }}" | Out-Null
-          Write-Host "VCPKG_BINARY_CACHE=${{ env.VCPKG_BINARY_CACHE }}"
-          Write-Host "VCPKG_BINARY_SOURCES=${{ env.VCPKG_BINARY_SOURCES }}"
-
-      - name: Install UHD dependencies with vcpkg
-        shell: pwsh
-        run: |
-          vcpkg version
-
-          vcpkg install `
-            boost-asio:x64-windows `
-            boost-format:x64-windows `
-            boost-math:x64-windows `
-            boost-graph:x64-windows `
-            boost-filesystem:x64-windows `
-            boost-program-options:x64-windows `
-            boost-system:x64-windows `
-            boost-thread:x64-windows `
-            boost-serialization:x64-windows `
-            boost-regex:x64-windows `
-            boost-date-time:x64-windows `
-            boost-chrono:x64-windows `
-            libusb:x64-windows `
-            libusb-win32:x64-windows `
-            fmt:x64-windows `
-            spdlog:x64-windows
-
-      - name: Locate dependency paths
-        id: deps
-        shell: pwsh
-        run: |
-          $vcpkgInstalled = "C:\vcpkg\installed\x64-windows"
-
-          $boostInclude = Join-Path $vcpkgInstalled "include"
-          $boostLib = Join-Path $vcpkgInstalled "lib"
-          $boostShare = Join-Path $vcpkgInstalled "share\boost"
-
-          $libusbInclude = Join-Path $vcpkgInstalled "include\libusb-1.0"
-          $libusbLib = Join-Path $vcpkgInstalled "lib\libusb-1.0.lib"
-
-          $requiredBoostHeaders = @(
-            "boost\asio.hpp",
-            "boost\format.hpp",
-            "boost\math\special_functions\round.hpp",
-            "boost\graph\adjacency_list.hpp"
-          )
-
-          foreach ($header in $requiredBoostHeaders) {
-            $path = Join-Path $boostInclude $header
-            if (!(Test-Path $path)) {
-              throw "Missing Boost header: $path"
-            }
+          if (!(Test-Path "${{ env.DOCKERFILE }}")) {
+            throw "Dockerfile not found: ${{ env.DOCKERFILE }}"
           }
 
-          if (!(Test-Path $boostShare)) {
-            throw "Boost_DIR not found: $boostShare"
+          docker build `
+            --isolation=process `
+            -t ${{ env.DOCKER_IMAGE }} `
+            -f ${{ env.DOCKERFILE }} `
+            .
+
+      - name: Build UHD inside Docker container
+        shell: pwsh
+        run: |
+          $workspace = "${{ github.workspace }}"
+          $dist = Join-Path $workspace "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          $buildCmd = @'
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 && ^
+          git config --global --add safe.directory C:/src && ^
+          if exist C:\uhd-build rmdir /S /Q C:\uhd-build && ^
+          if exist C:\out\uhd-install rmdir /S /Q C:\out\uhd-install && ^
+          mkdir C:\uhd-build && ^
+          cmake -S C:\src\host -B C:\uhd-build ^
+            -G "Visual Studio 17 2022" ^
+            -A x64 ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INSTALL_PREFIX=C:\out\uhd-install ^
+            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+            -DVCPKG_TARGET_TRIPLET=uhd-x64-windows-static-md ^
+            -DVCPKG_INSTALLED_DIR=C:\uhd-vcpkg\vcpkg_installed ^
+            -DVCPKG_MANIFEST_DIR=C:\uhd-vcpkg ^
+            -DENABLE_TESTS=OFF ^
+            -DENABLE_EXAMPLES=OFF ^
+            -DENABLE_UTILS=ON ^
+            -DENABLE_USB=ON ^
+            -DENABLE_PYTHON_API=OFF ^
+            -DENABLE_C_API=ON ^
+            -DCMAKE_C_FLAGS="/MP" ^
+            -DCMAKE_CXX_FLAGS="/MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" && ^
+          cmake --build C:\uhd-build --config Release --parallel %NUMBER_OF_PROCESSORS% -- /m:%NUMBER_OF_PROCESSORS% && ^
+          cmake --install C:\uhd-build --config Release
+          '@
+
+          docker run `
+            --rm `
+            --isolation=process `
+            --cpu-count 6 `
+            --memory 12G `
+            -v "${workspace}:C:\src" `
+            -v "${dist}:C:\out" `
+            ${{ env.DOCKER_IMAGE }} `
+            cmd /S /C $buildCmd
+
+      - name: Verify install output
+        shell: pwsh
+        run: |
+          $install = "${{ github.workspace }}\dist\uhd-install"
+
+          if (!(Test-Path $install)) {
+            throw "Install directory not found: $install"
           }
 
-          if (!(Test-Path (Join-Path $libusbInclude "libusb.h"))) {
-            throw "libusb.h not found"
-          }
+          Get-ChildItem -Recurse $install | Select-Object FullName
 
-          if (!(Test-Path $libusbLib)) {
-            throw "libusb-1.0.lib not found"
-          }
-
-          "BOOST_DIR=$boostShare" >> $env:GITHUB_ENV
-          "BOOST_INCLUDE_DIR=$boostInclude" >> $env:GITHUB_ENV
-          "BOOST_LIBRARY_DIR=$boostLib" >> $env:GITHUB_ENV
-          "LIBUSB_INCLUDE_DIRS=$libusbInclude" >> $env:GITHUB_ENV
-          "LIBUSB_LIBRARIES=$libusbLib" >> $env:GITHUB_ENV
-
-          Write-Host "BOOST_DIR=$boostShare"
-          Write-Host "BOOST_INCLUDE_DIR=$boostInclude"
-          Write-Host "BOOST_LIBRARY_DIR=$boostLib"
-          Write-Host "LIBUSB_INCLUDE_DIRS=$libusbInclude"
-          Write-Host "LIBUSB_LIBRARIES=$libusbLib"
-
-      - name: Configure UHD
-        shell: pwsh
-        run: |
-          cmake -S host -B build `
-            -G "Visual Studio 17 2022" `
-            -A x64 `
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
-            -DCMAKE_C_FLAGS="/MP" `
-            -DCMAKE_CXX_FLAGS="/MP /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" `
-            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" `
-            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DCMAKE_PREFIX_PATH="C:\vcpkg\installed\x64-windows" `
-            -DBoost_DIR="${{ env.BOOST_DIR }}" `
-            -DBoost_INCLUDE_DIR="${{ env.BOOST_INCLUDE_DIR }}" `
-            -DBOOST_INCLUDEDIR="${{ env.BOOST_INCLUDE_DIR }}" `
-            -DBOOST_LIBRARYDIR="${{ env.BOOST_LIBRARY_DIR }}" `
-            -DBoost_NO_SYSTEM_PATHS=ON `
-            -DLIBUSB_INCLUDE_DIRS="${{ env.LIBUSB_INCLUDE_DIRS }}" `
-            -DLIBUSB_LIBRARIES="${{ env.LIBUSB_LIBRARIES }}" `
-            -DPYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
-            -DRUNTIME_PYTHON_EXECUTABLE="${{ steps.setup-python.outputs.python-path }}" `
-            -DENABLE_TESTS=OFF `
-            -DENABLE_EXAMPLES=OFF `
-            -DENABLE_UTILS=ON `
-            -DENABLE_USB=ON `
-            -DENABLE_PYTHON_API=OFF `
-            -DENABLE_C_API=ON
-
-      - name: Build UHD
-        shell: pwsh
-        run: |
-          $cpu = [Environment]::ProcessorCount
-          Write-Host "CPU count: $cpu"
-
-          cmake --build build `
-            --config ${{ env.BUILD_TYPE }} `
-            --parallel $cpu `
-            -- `
-            /m:$cpu
-
-      - name: Install UHD
-        shell: pwsh
-        run: |
-          cmake --install build --config ${{ env.BUILD_TYPE }}
-
-      - name: Copy vcpkg runtime DLLs
-        shell: pwsh
-        run: |
-          $bin = "${{ env.INSTALL_DIR }}\bin"
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-
-          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
-          if (Test-Path $vcpkgBin) {
-            Copy-Item "$vcpkgBin\*.dll" $bin -Force -ErrorAction SilentlyContinue
+          if (!(Test-Path "$install\bin")) {
+            throw "UHD install bin directory not found"
           }
 
       - name: Package UHD as zip
@@ -211,11 +122,11 @@ jobs:
           }
 
           $safeName = $name -replace '[^a-zA-Z0-9._-]', '-'
-          $zipName = "uhd-windows-x64-$safeName.zip"
+          $zipName = "uhd-windows-x64-docker-$safeName.zip"
 
           Compress-Archive `
-            -Path "${{ env.INSTALL_DIR }}\*" `
-            -DestinationPath "$zipName" `
+            -Path "${{ github.workspace }}\dist\uhd-install\*" `
+            -DestinationPath "${{ github.workspace }}\$zipName" `
             -Force
 
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
