@@ -1,0 +1,10 @@
+#
+# Copyright
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+if(ENABLE_VX300)
+    LIBUHD_APPEND_SOURCES(
+        ${CMAKE_CURRENT_SOURCE_DIR}/vx300_impl.cpp
+    )
+endif(ENABLE_VX300)
